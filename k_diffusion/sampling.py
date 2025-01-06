@@ -104,24 +104,6 @@ class BatchedBrownianTree:
         print(f"[BatchedBrownianTree] Generated noise shape: {result.shape}")
         return result
     
-class BatchedBrownianTreeCustom:
-    def __init__(self, x, t0, t1, seed=None, **kwargs):
-        self.shape = x.shape
-        self.device = x.device  # Store the device from input tensor
-        if seed is not None:
-            torch.manual_seed(seed)
-        print(f"\033[93m[QUANTUM NOISE] Initializing simple Gaussian noise")
-        print(f"Shape: {self.shape}")
-        print(f"Device: {self.device}")
-        print(f"t0: {t0:.6f}, t1: {t1:.6f}")
-        print(f"Seed: {seed}\033[0m")
-
-    def __call__(self, t0, t1):
-        # Generate noise on the same device as input tensor
-        noise = torch.randn(self.shape, device=self.device)
-        print(f"\033[93m[QUANTUM NOISE] Generated Gaussian noise: {noise.shape} on {self.device}\033[0m")
-        return noise
-
 
 class BrownianTreeNoiseSampler:
     """A noise sampler backed by a torchsde.BrownianTree.
@@ -162,7 +144,7 @@ class BrownianTreeNoiseSampler:
         print(f"[k-diffusion, sampling.py, BrownianTreeNoiseSampler] Step size: {step_size:.3f} ({percent_change:.1f}% reduction)")
         print(f"[k-diffusion, sampling.py, BrownianTreeNoiseSampler] Noise shape: {noise.shape}")
         print(f"[k-diffusion, sampling.py, BrownianTreeNoiseSampler] Total elements: {noise.numel():,}")
-
+        
         return noise
 
 
@@ -171,46 +153,60 @@ class BrownianTreeNoiseSamplerCustom:
         self.transform = transform
         t0, t1 = self.transform(torch.as_tensor(sigma_min)), self.transform(torch.as_tensor(sigma_max))
         
-        shape = x.shape
-        batch_size = x.shape[0]
-        channel_count = x.shape[1]
-        sequence_length = x.shape[2]
-        total_samples = x.numel()
+        # Store shape and device for noise generation
+        self.shape = x.shape
+        self.device = x.device
+        
+        # Store sigma range for scaling
+        self.sigma_min = sigma_min
+        self.sigma_max = sigma_max
+
+        # Load noise file once during initialization
         noise_path = get_noise_file_path()
-
-        self.tree = BatchedBrownianTreeCustom(x, t0, t1, seed)
-
-        print(f"\033[92m[k-diffusion, sampling.py, BrownianTreeNoiseSamplerCustom] Path: {noise_path}\033[0m")
-        print(f"\033[91m[k-diffusion, sampling.py, BrownianTreeNoiseSamplerCustom] NOISE GENERATION STEP 1 (Initialization)\033[0m")
-        print(f"[k-diffusion, sampling.py, BrownianTreeNoiseSamplerCustom] Initializing BrownianTree for audio shape: {shape}")
-        print(f"[k-diffusion, sampling.py, BrownianTreeNoiseSamplerCustom] Batch size: {batch_size}")
-        print(f"[k-diffusion, sampling.py, BrownianTreeNoiseSamplerCustom] Channel count: {channel_count}")
-        print(f"[k-diffusion, sampling.py, BrownianTreeNoiseSamplerCustom] Sequence length: {sequence_length}")
-        print(f"[k-diffusion, sampling.py, BrownianTreeNoiseSamplerCustom] Total audio samples: {total_samples:,}")
+        self.full_noise = torch.load(noise_path).to(self.device)
+        
+        print(f"\033[93m[QUANTUM NOISE] Initializing with pre-generated noise")
+        print(f"Full noise shape: {self.full_noise.shape}")
+        print(f"Sample shape: {self.shape}")
+        print(f"Device: {self.device}")
+        print(f"Sigma range: {sigma_min:.4f} → {sigma_max:.4f}")
+        print(f"Path: {noise_path}\033[0m")
 
     def __call__(self, sigma, sigma_next, step):
-        t0, t1 = self.transform(torch.as_tensor(sigma)), self.transform(torch.as_tensor(sigma_next))
-        noise = self.tree(t0, t1) / (t1 - t0).abs().sqrt()
-
-        batch_size = noise.shape[0]
-        channel_count = noise.shape[1]
-        sequence_length = noise.shape[2]
-        total_samples = noise.shape.numel()
-        step_size = sigma - sigma_next
-        percent_change = (step_size / sigma) * 100
-        noise_path = get_noise_file_path()
-
-        print(f"\033[92m[k-diffusion, sampling.py, BrownianTreeNoiseSamplerCustom] Path: {noise_path}\033[0m")
-        print(f"\033[91m[k-diffusion, sampling.py, BrownianTreeNoiseSamplerCustom] NOISE GENERATION STEP {step + 2}\033[0m")
-        print(f"[k-diffusion, sampling.py, BrownianTreeNoiseSamplerCustom] Initializing BrownianTree for audio shape: {noise.shape}")
-        print(f"[k-diffusion, sampling.py, BrownianTreeNoiseSamplerCustom] Batch size: {batch_size}")
-        print(f"[k-diffusion, sampling.py, BrownianTreeNoiseSamplerCustom] Channel count: {channel_count}")
-        print(f"[k-diffusion, sampling.py, BrownianTreeNoiseSamplerCustom] Sequence length: {sequence_length}")
-        print(f"[k-diffusion, sampling.py, BrownianTreeNoiseSamplerCustom] Total audio samples: {total_samples:,}")
-        print(f"[k-diffusion, sampling.py, BrownianTreeNoiseSamplerCustom] From sigma: {sigma:.3f} to {sigma_next:.3f}")
-        print(f"[k-diffusion, sampling.py, BrownianTreeNoiseSamplerCustom] Step size: {step_size:.3f} ({percent_change:.1f}% reduction)")
-
+        # Calculate window indices
+        samples_per_step = self.shape[2]
+        start_idx = step * samples_per_step
+        end_idx = start_idx + samples_per_step
+        
+        # Extract window from pre-loaded noise tensor
+        base_noise = self.full_noise[:, :, start_idx:end_idx]
+        
+        # 1. Center the noise around zero
+        base_noise = base_noise - base_noise.mean()
+        
+        # 2. Normalize to [-1, 1] range
+        max_val = base_noise.abs().max()
+        if max_val > 0:
+            base_noise = base_noise / max_val
+        
+        # 3. Scale to match Brownian distribution range (approximately [-4, 4])
+        base_noise = base_noise * 4.0
+        
+        # Calculate progress and scale factor
+        total_range = self.sigma_max - self.sigma_min
+        current_progress = (sigma - self.sigma_min) / total_range
+        noise_scale = current_progress
+        
+        # Apply final scaling
+        noise = base_noise * noise_scale
+        
+        # Debug output
+        print(f"\033[96m[QUANTUM NOISE DEBUG]")
+        print(f"After normalization: min={base_noise.min():.6f}, max={base_noise.max():.6f}, mean={base_noise.mean():.6f}")
+        print(f"After scaling ({noise_scale:.4f}): min={noise.min():.6f}, max={noise.max():.6f}, mean={noise.mean():.6f}\033[0m")
+        
         return noise
+
 
 @torch.no_grad()
 def sample_euler(model, x, sigmas, extra_args=None, callback=None, disable=None, s_churn=0., s_tmin=0., s_tmax=float('inf'), s_noise=1.):
