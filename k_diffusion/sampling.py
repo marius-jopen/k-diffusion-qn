@@ -128,9 +128,53 @@ class BrownianTreeNoiseSampler:
         print(f"[k-diffusion, sampling.py, BrownianTreeNoiseSampler] Step size: {step_size:.3f} ({percent_change:.1f}% reduction)")
         print(f"[k-diffusion, sampling.py, BrownianTreeNoiseSampler] Noise shape: {noise.shape}")
         print(f"[k-diffusion, sampling.py, BrownianTreeNoiseSampler] Total elements: {noise.numel():,}")
-        
+
         return noise
 
+
+class BrownianTreeNoiseSamplerCustom:
+    """A noise sampler backed by a torchsde.BrownianTree.
+
+    Args:
+        x (Tensor): The tensor whose shape, device and dtype to use to generate
+            random samples.
+        sigma_min (float): The low end of the valid interval.
+        sigma_max (float): The high end of the valid interval.
+        seed (int or List[int]): The random seed. If a list of seeds is
+            supplied instead of a single integer, then the noise sampler will
+            use one BrownianTree per batch item, each with its own seed.
+        transform (callable): A function that maps sigma to the sampler's
+            internal timestep.
+    """
+
+    def __init__(self, x, sigma_min, sigma_max, seed=None, transform=lambda x: x):
+        self.transform = transform
+        print(f"\033[92mQUANTUM\033[0m")  # 92m is bright green
+        print(f"\033[91m[k-diffusion, sampling.py, BrownianTreeNoiseSamplerCustom] NOISE GENERATION STEP 1 (Initialization)\033[0m")
+        t0, t1 = self.transform(torch.as_tensor(sigma_min)), self.transform(torch.as_tensor(sigma_max))
+        shape = x.shape
+        total_samples = x.numel()
+        print(f"[k-diffusion, sampling.py, BrownianTreeNoiseSamplerCustom] Initializing BrownianTree for audio shape: {shape}")
+        print(f"[k-diffusion, sampling.py, BrownianTreeNoiseSamplerCustom] Total audio samples: {total_samples:,}")
+        self.tree = BatchedBrownianTree(x, t0, t1, seed)
+
+    def __call__(self, sigma, sigma_next, step):
+        print(f"\033[92mQUANTUM\033[0m")  # 92m is bright green
+        print(f"\033[91m[k-diffusion, sampling.py, BrownianTreeNoiseSamplerCustom] NOISE GENERATION STEP {step + 2}\033[0m")
+        t0, t1 = self.transform(torch.as_tensor(sigma)), self.transform(torch.as_tensor(sigma_next))
+        noise = self.tree(t0, t1) / (t1 - t0).abs().sqrt()
+        
+        # Calculate step info
+        step_size = sigma - sigma_next
+        percent_change = (step_size / sigma) * 100
+        
+        print(f"[k-diffusion, sampling.py, BrownianTreeNoiseSamplerCustom] Noise generation:")
+        print(f"[k-diffusion, sampling.py, BrownianTreeNoiseSamplerCustom] From sigma: {sigma:.3f} to {sigma_next:.3f}")
+        print(f"[k-diffusion, sampling.py, BrownianTreeNoiseSamplerCustom] Step size: {step_size:.3f} ({percent_change:.1f}% reduction)")
+        print(f"[k-diffusion, sampling.py, BrownianTreeNoiseSamplerCustom] Noise shape: {noise.shape}")
+        print(f"[k-diffusion, sampling.py, BrownianTreeNoiseSamplerCustom] Total elements: {noise.numel():,}")
+
+        return noise
 
 @torch.no_grad()
 def sample_euler(model, x, sigmas, extra_args=None, callback=None, disable=None, s_churn=0., s_tmin=0., s_tmax=float('inf'), s_noise=1.):
@@ -671,13 +715,19 @@ def sample_dpmpp_2m_sde(model, x, sigmas, extra_args=None, callback=None, disabl
 
 
 @torch.no_grad()
-def sample_dpmpp_3m_sde(model, x, sigmas, extra_args=None, callback=None, disable=None, eta=1., s_noise=1., noise_sampler=None):
+def sample_dpmpp_3m_sde(model, x, sigmas, extra_args=None, callback=None, disable=None, eta=1., s_noise=1., noise_sampler=None, quantum=False):
     """DPM-Solver++(3M) SDE."""
 
-    print(f"[k-diffusion, sampling.py, sample_dpmpp_3m_sde] Starting DPM-Solver++(3M) SDE sampling")
+    print(f"[k-diffusion, sampling.py, sample_dpmpp_3m_sde] Starting DPM-Solver++(3M) SDE sampling with quantum={quantum}")
     sigma_min, sigma_max = sigmas[sigmas > 0].min(), sigmas.max()
     print(f"[k-diffusion, sampling.py, sample_dpmpp_3m_sde] Sigma range: {sigma_max:.3f} -> {sigma_min:.3f}")
-    noise_sampler = BrownianTreeNoiseSampler(x, sigma_min, sigma_max) if noise_sampler is None else noise_sampler
+    
+    if noise_sampler is None:
+        if quantum:
+            noise_sampler = BrownianTreeNoiseSamplerCustom(x, sigma_min, sigma_max)
+        else:
+            noise_sampler = BrownianTreeNoiseSampler(x, sigma_min, sigma_max)
+    
     extra_args = {} if extra_args is None else extra_args
     s_in = x.new_ones([x.shape[0]])
 
