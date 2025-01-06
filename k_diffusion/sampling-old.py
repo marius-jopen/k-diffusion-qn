@@ -1,6 +1,4 @@
 import math
-import os
-from pathlib import Path
 
 from scipy import integrate
 import torch
@@ -68,28 +66,17 @@ class BatchedBrownianTree:
     """A wrapper around torchsde.BrownianTree that enables batches of entropy."""
 
     def __init__(self, x, t0, t1, seed=None, **kwargs):
-        print(f"[k-diffusion, sampling.py, BrownianTree] Initializing with shape: {x.shape}")
-        print(f"[k-diffusion, sampling.py, BrownianTree] t0: {t0:.6f}, t1: {t1:.6f}")
-        
         t0, t1, self.sign = self.sort(t0, t1)
         w0 = kwargs.get('w0', torch.zeros_like(x))
         if seed is None:
             seed = torch.randint(0, 2 ** 63 - 1, []).item()
-            print(f"[k-diffusion, sampling.py, BrownianTree] Generated random seed: {seed}")
-        else:
-            print(f"[k-diffusion, sampling.py, BrownianTree] Using provided seed: {seed}")
-            
         self.batched = True
         try:
             assert len(seed) == x.shape[0]
             w0 = w0[0]
-            print(f"[k-diffusion, sampling.py, BrownianTree] Using batched mode with {len(seed)} seeds")
         except TypeError:
             seed = [seed]
             self.batched = False
-            print("[k-diffusion, sampling.py, BrownianTree] Using single seed mode")
-            
-        print(f"[k-diffusion, sampling.py, BrownianTree] Creating {len(seed)} Brownian tree(s)")
         self.trees = [torchsde.BrownianTree(t0, w0, t1, entropy=s, **kwargs) for s in seed]
 
     @staticmethod
@@ -97,13 +84,10 @@ class BatchedBrownianTree:
         return (a, b, 1) if a < b else (b, a, -1)
 
     def __call__(self, t0, t1):
-        print(f"[BatchedBrownianTree] Sampling noise from t0: {t0:.6f} to t1: {t1:.6f}")
         t0, t1, sign = self.sort(t0, t1)
         w = torch.stack([tree(t0, t1) for tree in self.trees]) * (self.sign * sign)
-        result = w if self.batched else w[0]
-        print(f"[BatchedBrownianTree] Generated noise shape: {result.shape}")
-        return result
-    
+        return w if self.batched else w[0]
+
 
 class BrownianTreeNoiseSampler:
     """A noise sampler backed by a torchsde.BrownianTree.
@@ -122,87 +106,12 @@ class BrownianTreeNoiseSampler:
 
     def __init__(self, x, sigma_min, sigma_max, seed=None, transform=lambda x: x):
         self.transform = transform
-        print(f"\033[91m[k-diffusion, sampling.py, BrownianTreeNoiseSampler] NOISE GENERATION STEP 1 (Initialization)\033[0m")
         t0, t1 = self.transform(torch.as_tensor(sigma_min)), self.transform(torch.as_tensor(sigma_max))
-        shape = x.shape
-        total_samples = x.numel()
-        print(f"[k-diffusion, sampling.py, BrownianTreeNoiseSampler] Initializing BrownianTree for audio shape: {shape}")
-        print(f"[k-diffusion, sampling.py, BrownianTreeNoiseSampler] Total audio samples: {total_samples:,}")
         self.tree = BatchedBrownianTree(x, t0, t1, seed)
 
-    def __call__(self, sigma, sigma_next, step):
-        print(f"\033[91m[k-diffusion, sampling.py, BrownianTreeNoiseSampler] NOISE GENERATION STEP {step + 2}\033[0m")
+    def __call__(self, sigma, sigma_next):
         t0, t1 = self.transform(torch.as_tensor(sigma)), self.transform(torch.as_tensor(sigma_next))
-        noise = self.tree(t0, t1) / (t1 - t0).abs().sqrt()
-        
-        # Calculate step info
-        step_size = sigma - sigma_next
-        percent_change = (step_size / sigma) * 100
-        
-        print(f"[k-diffusion, sampling.py, BrownianTreeNoiseSampler] Noise generation:")
-        print(f"[k-diffusion, sampling.py, BrownianTreeNoiseSampler] From sigma: {sigma:.3f} to {sigma_next:.3f}")
-        print(f"[k-diffusion, sampling.py, BrownianTreeNoiseSampler] Step size: {step_size:.3f} ({percent_change:.1f}% reduction)")
-        print(f"[k-diffusion, sampling.py, BrownianTreeNoiseSampler] Noise shape: {noise.shape}")
-        print(f"[k-diffusion, sampling.py, BrownianTreeNoiseSampler] Total elements: {noise.numel():,}")
-        
-        return noise
-
-
-class BrownianTreeNoiseSamplerCustom:
-    def __init__(self, x, sigma_min, sigma_max, seed=None, transform=lambda x: x):
-        # Store shape and device for noise generation
-        self.shape = x.shape
-        self.device = x.device
-        self.transform = transform
-
-        # Load noise file once during initialization
-        noise_path = get_noise_file_path()
-        self.full_noise = torch.load(noise_path).to(self.device)
-        
-        print(f"\033[93m[QUANTUM NOISE] Initializing with pre-generated noise")
-        print(f"Full noise shape: {self.full_noise.shape}")
-        print(f"Sample shape: {self.shape}")
-        print(f"Device: {self.device}")
-        print(f"Sigma range: {sigma_min:.4f} → {sigma_max:.4f}")
-        print(f"Path: {noise_path}\033[0m")
-
-    def __call__(self, sigma, sigma_next, step):
-        # Calculate window indices
-        samples_per_step = self.shape[2]
-        start_idx = step * samples_per_step
-        end_idx = start_idx + samples_per_step
-        
-        # Extract window from pre-loaded noise tensor
-        base_noise = self.full_noise[:, :, start_idx:end_idx]
-        
-        # Gentler centering around zero
-        mean_val = base_noise.mean()
-        base_noise = base_noise - (mean_val * 0.8)  # Only remove 80% of the mean
-        
-        # Softer normalization
-        max_val = base_noise.abs().max()
-        if max_val > 0:
-            base_noise = base_noise / max_val
-            # Add smooth tanh curve to reduce extreme values
-            base_noise = torch.tanh(base_noise * 1.5)
-        
-        # Transform sigma values
-        t0 = self.transform(torch.as_tensor(sigma))
-        t1 = self.transform(torch.as_tensor(sigma_next))
-        
-        # Reduced scaling factor
-        scale = 2.5 / (t1 - t0).abs().sqrt()  # Reduced from 3.5 to 2.5
-        
-        # Apply smoothed scaling
-        noise = base_noise * scale
-        
-        # Debug output
-        print(f"\033[96m[NOISE DEBUG] Step {step}")
-        print(f"Sigma: {sigma:.3f} → {sigma_next:.3f}")
-        print(f"Scale factor: {scale:.3f}")
-        print(f"Noise range: {noise.min().item():.3f} to {noise.max().item():.3f}\033[0m")
-        
-        return noise
+        return self.tree(t0, t1) / (t1 - t0).abs().sqrt()
 
 
 @torch.no_grad()
@@ -747,16 +656,8 @@ def sample_dpmpp_2m_sde(model, x, sigmas, extra_args=None, callback=None, disabl
 def sample_dpmpp_3m_sde(model, x, sigmas, extra_args=None, callback=None, disable=None, eta=1., s_noise=1., noise_sampler=None, quantum=False):
     """DPM-Solver++(3M) SDE."""
 
-    print(f"[k-diffusion, sampling.py, sample_dpmpp_3m_sde] Starting DPM-Solver++(3M) SDE sampling with quantum={quantum}")
     sigma_min, sigma_max = sigmas[sigmas > 0].min(), sigmas.max()
-    print(f"[k-diffusion, sampling.py, sample_dpmpp_3m_sde] Sigma range: {sigma_max:.3f} -> {sigma_min:.3f}")
-    
-    if noise_sampler is None:
-        if quantum:
-            noise_sampler = BrownianTreeNoiseSamplerCustom(x, sigma_min, sigma_max)
-        else:
-            noise_sampler = BrownianTreeNoiseSampler(x, sigma_min, sigma_max)
-    
+    noise_sampler = BrownianTreeNoiseSampler(x, sigma_min, sigma_max) if noise_sampler is None else noise_sampler
     extra_args = {} if extra_args is None else extra_args
     s_in = x.new_ones([x.shape[0]])
 
@@ -764,7 +665,6 @@ def sample_dpmpp_3m_sde(model, x, sigmas, extra_args=None, callback=None, disabl
     h_1, h_2 = None, None
 
     for i in trange(len(sigmas) - 1, disable=disable):
-        print(f"[k-diffusion, sampling.py, sample_dpmpp_3m_sde] DPM++ 3M SDE Step {i}/{len(sigmas)-1}")
         denoised = model(x, sigmas[i] * s_in, **extra_args)
         if callback is not None:
             callback({'x': x, 'i': i, 'sigma': sigmas[i], 'sigma_hat': sigmas[i], 'denoised': denoised})
@@ -795,56 +695,8 @@ def sample_dpmpp_3m_sde(model, x, sigmas, extra_args=None, callback=None, disabl
                 x = x + phi_2 * d
 
             if eta:
-                print(f"[k-diffusion, sampling.py, sample_dpmpp_3m_sde] Calling noise sampler for step {i}")
-                x = x + noise_sampler(sigmas[i], sigmas[i + 1], i) * sigmas[i + 1] * (-2 * h * eta).expm1().neg().sqrt() * s_noise
+                x = x + noise_sampler(sigmas[i], sigmas[i + 1]) * sigmas[i + 1] * (-2 * h * eta).expm1().neg().sqrt() * s_noise
 
         denoised_1, denoised_2 = denoised, denoised_1
         h_1, h_2 = h, h_1
     return x
-
-
-_cached_noise = None
-_cached_noise_path = None
-
-def get_noise_file_path():
-    """Gets the full path to the quantum noise file"""
-    return Path("C:/ai-tools/ComfyUI-qn/quantum-noise/qn-full-high-noise-full.pt")
-
-def load_quantum_noise(shape, device):
-    """Loads and prepares quantum noise for use"""
-    global _cached_noise, _cached_noise_path
-    
-    noise_path = Path("C:/ai-tools/ComfyUI-qn/quantum-noise/output/qn-full-latent/audio-1/qn-full-high-noise-full.pt")
-    
-    # Return cached noise if available
-    if _cached_noise is not None:
-        saved_noise = _cached_noise
-    else:
-        try:
-            print("\033[93m[QUANTUM NOISE] Loading noise file:", noise_path.name)
-            print("[QUANTUM NOISE] Full path:", str(noise_path), "\033[0m")
-            
-            _cached_noise = torch.load(noise_path)
-            saved_noise = _cached_noise
-            
-            print("\033[93m[QUANTUM NOISE] Successfully loaded noise")
-            print("[QUANTUM NOISE] Noise shape:", saved_noise.shape, "\033[0m")
-            
-        except Exception as e:
-            print(f"\033[93m[QUANTUM NOISE] Error loading noise file: {str(e)}\033[0m")
-            return torch.randn(shape, device=device)
-    
-    # Select random batch for variety
-    batch_size = saved_noise.shape[0]
-    batch_idx = int(torch.randint(0, batch_size, (1,)).item())
-    
-    # Return the noise
-    noise = saved_noise[batch_idx:batch_idx+1]
-    
-    # Ensure final shape matches target shape
-    if len(shape) == 4 and len(noise.shape) == 3:  # Need batch dim
-        noise = noise.unsqueeze(0)
-        if shape[0] > 1:  # Need multiple batches
-            noise = noise.expand(shape[0], -1, -1, -1)
-    
-    return noise.to(device)
