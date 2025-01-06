@@ -1,4 +1,6 @@
 import math
+import os
+from pathlib import Path
 
 from scipy import integrate
 import torch
@@ -101,6 +103,24 @@ class BatchedBrownianTree:
         result = w if self.batched else w[0]
         print(f"[BatchedBrownianTree] Generated noise shape: {result.shape}")
         return result
+    
+class BatchedBrownianTreeCustom:
+    def __init__(self, x, t0, t1, seed=None, **kwargs):
+        self.shape = x.shape
+        self.device = x.device  # Store the device from input tensor
+        if seed is not None:
+            torch.manual_seed(seed)
+        print(f"\033[93m[QUANTUM NOISE] Initializing simple Gaussian noise")
+        print(f"Shape: {self.shape}")
+        print(f"Device: {self.device}")
+        print(f"t0: {t0:.6f}, t1: {t1:.6f}")
+        print(f"Seed: {seed}\033[0m")
+
+    def __call__(self, t0, t1):
+        # Generate noise on the same device as input tensor
+        noise = torch.randn(self.shape, device=self.device)
+        print(f"\033[93m[QUANTUM NOISE] Generated Gaussian noise: {noise.shape} on {self.device}\033[0m")
+        return noise
 
 
 class BrownianTreeNoiseSampler:
@@ -149,7 +169,6 @@ class BrownianTreeNoiseSampler:
 class BrownianTreeNoiseSamplerCustom:
     def __init__(self, x, sigma_min, sigma_max, seed=None, transform=lambda x: x):
         self.transform = transform
-
         t0, t1 = self.transform(torch.as_tensor(sigma_min)), self.transform(torch.as_tensor(sigma_max))
         
         shape = x.shape
@@ -157,10 +176,11 @@ class BrownianTreeNoiseSamplerCustom:
         channel_count = x.shape[1]
         sequence_length = x.shape[2]
         total_samples = x.numel()
-        
-        self.tree = BatchedBrownianTree(x, t0, t1, seed)
+        noise_path = get_noise_file_path()
 
-        print(f"\033[92mQUANTUM\033[0m")  # 92m is bright green
+        self.tree = BatchedBrownianTreeCustom(x, t0, t1, seed)
+
+        print(f"\033[92m[k-diffusion, sampling.py, BrownianTreeNoiseSamplerCustom] Path: {noise_path}\033[0m")
         print(f"\033[91m[k-diffusion, sampling.py, BrownianTreeNoiseSamplerCustom] NOISE GENERATION STEP 1 (Initialization)\033[0m")
         print(f"[k-diffusion, sampling.py, BrownianTreeNoiseSamplerCustom] Initializing BrownianTree for audio shape: {shape}")
         print(f"[k-diffusion, sampling.py, BrownianTreeNoiseSamplerCustom] Batch size: {batch_size}")
@@ -168,9 +188,7 @@ class BrownianTreeNoiseSamplerCustom:
         print(f"[k-diffusion, sampling.py, BrownianTreeNoiseSamplerCustom] Sequence length: {sequence_length}")
         print(f"[k-diffusion, sampling.py, BrownianTreeNoiseSamplerCustom] Total audio samples: {total_samples:,}")
 
-
     def __call__(self, sigma, sigma_next, step):
-
         t0, t1 = self.transform(torch.as_tensor(sigma)), self.transform(torch.as_tensor(sigma_next))
         noise = self.tree(t0, t1) / (t1 - t0).abs().sqrt()
 
@@ -180,8 +198,9 @@ class BrownianTreeNoiseSamplerCustom:
         total_samples = noise.shape.numel()
         step_size = sigma - sigma_next
         percent_change = (step_size / sigma) * 100
-        
-        print(f"\033[92mQUANTUM\033[0m")  # 92m is bright green
+        noise_path = get_noise_file_path()
+
+        print(f"\033[92m[k-diffusion, sampling.py, BrownianTreeNoiseSamplerCustom] Path: {noise_path}\033[0m")
         print(f"\033[91m[k-diffusion, sampling.py, BrownianTreeNoiseSamplerCustom] NOISE GENERATION STEP {step + 2}\033[0m")
         print(f"[k-diffusion, sampling.py, BrownianTreeNoiseSamplerCustom] Initializing BrownianTree for audio shape: {noise.shape}")
         print(f"[k-diffusion, sampling.py, BrownianTreeNoiseSamplerCustom] Batch size: {batch_size}")
@@ -789,3 +808,50 @@ def sample_dpmpp_3m_sde(model, x, sigmas, extra_args=None, callback=None, disabl
         denoised_1, denoised_2 = denoised, denoised_1
         h_1, h_2 = h, h_1
     return x
+
+
+_cached_noise = None
+_cached_noise_path = None
+
+def get_noise_file_path():
+    """Gets the full path to the quantum noise file"""
+    return Path("C:/ai-tools/ComfyUI-qn/quantum-noise/qn-full-high-noise-full.pt")
+
+def load_quantum_noise(shape, device):
+    """Loads and prepares quantum noise for use"""
+    global _cached_noise, _cached_noise_path
+    
+    noise_path = Path("C:/ai-tools/ComfyUI-qn/quantum-noise/output/qn-full-latent/audio-1/qn-full-high-noise-full.pt")
+    
+    # Return cached noise if available
+    if _cached_noise is not None:
+        saved_noise = _cached_noise
+    else:
+        try:
+            print("\033[93m[QUANTUM NOISE] Loading noise file:", noise_path.name)
+            print("[QUANTUM NOISE] Full path:", str(noise_path), "\033[0m")
+            
+            _cached_noise = torch.load(noise_path)
+            saved_noise = _cached_noise
+            
+            print("\033[93m[QUANTUM NOISE] Successfully loaded noise")
+            print("[QUANTUM NOISE] Noise shape:", saved_noise.shape, "\033[0m")
+            
+        except Exception as e:
+            print(f"\033[93m[QUANTUM NOISE] Error loading noise file: {str(e)}\033[0m")
+            return torch.randn(shape, device=device)
+    
+    # Select random batch for variety
+    batch_size = saved_noise.shape[0]
+    batch_idx = int(torch.randint(0, batch_size, (1,)).item())
+    
+    # Return the noise
+    noise = saved_noise[batch_idx:batch_idx+1]
+    
+    # Ensure final shape matches target shape
+    if len(shape) == 4 and len(noise.shape) == 3:  # Need batch dim
+        noise = noise.unsqueeze(0)
+        if shape[0] > 1:  # Need multiple batches
+            noise = noise.expand(shape[0], -1, -1, -1)
+    
+    return noise.to(device)
