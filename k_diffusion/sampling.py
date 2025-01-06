@@ -66,17 +66,28 @@ class BatchedBrownianTree:
     """A wrapper around torchsde.BrownianTree that enables batches of entropy."""
 
     def __init__(self, x, t0, t1, seed=None, **kwargs):
+        print(f"[k-diffusion, sampling.py, BrownianTree] Initializing with shape: {x.shape}")
+        print(f"[k-diffusion, sampling.py, BrownianTree] t0: {t0:.6f}, t1: {t1:.6f}")
+        
         t0, t1, self.sign = self.sort(t0, t1)
         w0 = kwargs.get('w0', torch.zeros_like(x))
         if seed is None:
             seed = torch.randint(0, 2 ** 63 - 1, []).item()
+            print(f"[k-diffusion, sampling.py, BrownianTree] Generated random seed: {seed}")
+        else:
+            print(f"[k-diffusion, sampling.py, BrownianTree] Using provided seed: {seed}")
+            
         self.batched = True
         try:
             assert len(seed) == x.shape[0]
             w0 = w0[0]
+            print(f"[k-diffusion, sampling.py, BrownianTree] Using batched mode with {len(seed)} seeds")
         except TypeError:
             seed = [seed]
             self.batched = False
+            print("[k-diffusion, sampling.py, BrownianTree] Using single seed mode")
+            
+        print(f"[k-diffusion, sampling.py, BrownianTree] Creating {len(seed)} Brownian tree(s)")
         self.trees = [torchsde.BrownianTree(t0, w0, t1, entropy=s, **kwargs) for s in seed]
 
     @staticmethod
@@ -84,9 +95,12 @@ class BatchedBrownianTree:
         return (a, b, 1) if a < b else (b, a, -1)
 
     def __call__(self, t0, t1):
+        print(f"[BatchedBrownianTree] Sampling noise from t0: {t0:.6f} to t1: {t1:.6f}")
         t0, t1, sign = self.sort(t0, t1)
         w = torch.stack([tree(t0, t1) for tree in self.trees]) * (self.sign * sign)
-        return w if self.batched else w[0]
+        result = w if self.batched else w[0]
+        print(f"[BatchedBrownianTree] Generated noise shape: {result.shape}")
+        return result
 
 
 class BrownianTreeNoiseSampler:
@@ -133,46 +147,49 @@ class BrownianTreeNoiseSampler:
 
 
 class BrownianTreeNoiseSamplerCustom:
-    """A noise sampler backed by a torchsde.BrownianTree.
-
-    Args:
-        x (Tensor): The tensor whose shape, device and dtype to use to generate
-            random samples.
-        sigma_min (float): The low end of the valid interval.
-        sigma_max (float): The high end of the valid interval.
-        seed (int or List[int]): The random seed. If a list of seeds is
-            supplied instead of a single integer, then the noise sampler will
-            use one BrownianTree per batch item, each with its own seed.
-        transform (callable): A function that maps sigma to the sampler's
-            internal timestep.
-    """
-
     def __init__(self, x, sigma_min, sigma_max, seed=None, transform=lambda x: x):
         self.transform = transform
-        print(f"\033[92mQUANTUM\033[0m")  # 92m is bright green
-        print(f"\033[91m[k-diffusion, sampling.py, BrownianTreeNoiseSamplerCustom] NOISE GENERATION STEP 1 (Initialization)\033[0m")
+
         t0, t1 = self.transform(torch.as_tensor(sigma_min)), self.transform(torch.as_tensor(sigma_max))
+        
         shape = x.shape
+        batch_size = x.shape[0]
+        channel_count = x.shape[1]
+        sequence_length = x.shape[2]
         total_samples = x.numel()
-        print(f"[k-diffusion, sampling.py, BrownianTreeNoiseSamplerCustom] Initializing BrownianTree for audio shape: {shape}")
-        print(f"[k-diffusion, sampling.py, BrownianTreeNoiseSamplerCustom] Total audio samples: {total_samples:,}")
+        
         self.tree = BatchedBrownianTree(x, t0, t1, seed)
 
-    def __call__(self, sigma, sigma_next, step):
         print(f"\033[92mQUANTUM\033[0m")  # 92m is bright green
-        print(f"\033[91m[k-diffusion, sampling.py, BrownianTreeNoiseSamplerCustom] NOISE GENERATION STEP {step + 2}\033[0m")
+        print(f"\033[91m[k-diffusion, sampling.py, BrownianTreeNoiseSamplerCustom] NOISE GENERATION STEP 1 (Initialization)\033[0m")
+        print(f"[k-diffusion, sampling.py, BrownianTreeNoiseSamplerCustom] Initializing BrownianTree for audio shape: {shape}")
+        print(f"[k-diffusion, sampling.py, BrownianTreeNoiseSamplerCustom] Batch size: {batch_size}")
+        print(f"[k-diffusion, sampling.py, BrownianTreeNoiseSamplerCustom] Channel count: {channel_count}")
+        print(f"[k-diffusion, sampling.py, BrownianTreeNoiseSamplerCustom] Sequence length: {sequence_length}")
+        print(f"[k-diffusion, sampling.py, BrownianTreeNoiseSamplerCustom] Total audio samples: {total_samples:,}")
+
+
+    def __call__(self, sigma, sigma_next, step):
+
         t0, t1 = self.transform(torch.as_tensor(sigma)), self.transform(torch.as_tensor(sigma_next))
         noise = self.tree(t0, t1) / (t1 - t0).abs().sqrt()
-        
-        # Calculate step info
+
+        batch_size = noise.shape[0]
+        channel_count = noise.shape[1]
+        sequence_length = noise.shape[2]
+        total_samples = noise.shape.numel()
         step_size = sigma - sigma_next
         percent_change = (step_size / sigma) * 100
         
-        print(f"[k-diffusion, sampling.py, BrownianTreeNoiseSamplerCustom] Noise generation:")
+        print(f"\033[92mQUANTUM\033[0m")  # 92m is bright green
+        print(f"\033[91m[k-diffusion, sampling.py, BrownianTreeNoiseSamplerCustom] NOISE GENERATION STEP {step + 2}\033[0m")
+        print(f"[k-diffusion, sampling.py, BrownianTreeNoiseSamplerCustom] Initializing BrownianTree for audio shape: {noise.shape}")
+        print(f"[k-diffusion, sampling.py, BrownianTreeNoiseSamplerCustom] Batch size: {batch_size}")
+        print(f"[k-diffusion, sampling.py, BrownianTreeNoiseSamplerCustom] Channel count: {channel_count}")
+        print(f"[k-diffusion, sampling.py, BrownianTreeNoiseSamplerCustom] Sequence length: {sequence_length}")
+        print(f"[k-diffusion, sampling.py, BrownianTreeNoiseSamplerCustom] Total audio samples: {total_samples:,}")
         print(f"[k-diffusion, sampling.py, BrownianTreeNoiseSamplerCustom] From sigma: {sigma:.3f} to {sigma_next:.3f}")
         print(f"[k-diffusion, sampling.py, BrownianTreeNoiseSamplerCustom] Step size: {step_size:.3f} ({percent_change:.1f}% reduction)")
-        print(f"[k-diffusion, sampling.py, BrownianTreeNoiseSamplerCustom] Noise shape: {noise.shape}")
-        print(f"[k-diffusion, sampling.py, BrownianTreeNoiseSamplerCustom] Total elements: {noise.numel():,}")
 
         return noise
 
