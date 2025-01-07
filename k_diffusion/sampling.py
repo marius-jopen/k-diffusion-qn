@@ -158,6 +158,7 @@ class BrownianTreeNoiseSamplerCustom:
         # Load noise file once during initialization
         noise_path = get_noise_file_path()
         self.full_noise = torch.load(noise_path).to(self.device)
+        self.noise_length = self.full_noise.shape[2]  # Store total length
         
         print(f"\033[93m[QUANTUM NOISE] Initializing with pre-generated noise")
         print(f"Full noise shape: {self.full_noise.shape}")
@@ -167,33 +168,41 @@ class BrownianTreeNoiseSamplerCustom:
         print(f"Path: {noise_path}\033[0m")
 
     def __call__(self, sigma, sigma_next, step):
-        # Calculate window indices
+        # Calculate window indices with wrapping
         samples_per_step = self.shape[2]
-        start_idx = step * samples_per_step
+        start_idx = (step * samples_per_step) % self.noise_length
         end_idx = start_idx + samples_per_step
         
-        # Extract window from pre-loaded noise tensor
-        base_noise = self.full_noise[:, :, start_idx:end_idx]
+        # Check if we need to wrap around
+        if end_idx > self.noise_length:
+            # Calculate how many samples we need from the start
+            wrap_samples = end_idx - self.noise_length
+            
+            # Get samples from end of tensor
+            noise_end = self.full_noise[:, :, start_idx:self.noise_length]
+            # Get remaining samples from start of tensor
+            noise_start = self.full_noise[:, :, 0:wrap_samples]
+            # Concatenate them
+            base_noise = torch.cat([noise_end, noise_start], dim=2)
+            
+            print(f"\033[95m[QUANTUM NOISE WRAP] Step {step}")
+            print(f"Wrapped around: {self.noise_length-start_idx} + {wrap_samples} samples\033[0m")
+        else:
+            # Normal case - no wrapping needed
+            base_noise = self.full_noise[:, :, start_idx:end_idx]
         
-        # Gentler centering around zero
+        # Rest of the processing remains the same
         mean_val = base_noise.mean()
-        base_noise = base_noise - (mean_val * 0.8)  # Only remove 80% of the mean
+        base_noise = base_noise - (mean_val * 0.8)
         
-        # Softer normalization
         max_val = base_noise.abs().max()
         if max_val > 0:
             base_noise = base_noise / max_val
-            # Add smooth tanh curve to reduce extreme values
             base_noise = torch.tanh(base_noise * 1.5)
         
-        # Transform sigma values
         t0 = self.transform(torch.as_tensor(sigma))
         t1 = self.transform(torch.as_tensor(sigma_next))
-        
-        # Reduced scaling factor
-        scale = 2.5 / (t1 - t0).abs().sqrt()  # Reduced from 3.5 to 2.5
-        
-        # Apply smoothed scaling
+        scale = 2.5 / (t1 - t0).abs().sqrt()
         noise = base_noise * scale
         
         # Debug output
